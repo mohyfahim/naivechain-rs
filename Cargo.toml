@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+sha2 = "0.10"
+actix-web = "4"
+serde = { version = "1.0", features = ["derive"] }
