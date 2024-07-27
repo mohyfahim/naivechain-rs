@@ -7,3 +7,6 @@ edition = "2021"
 sha2 = "0.10"
 actix-web = "4"
 serde = { version = "1.0", features = ["derive"] }
+actix = "0.13.5"
+actix-web-actors = "4.3.0"
+tokio = "1.39.2"
