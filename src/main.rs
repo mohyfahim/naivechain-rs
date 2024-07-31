@@ -20,7 +20,7 @@ async fn run_periodic_task(state: Arc<Mutex<ApiState>>) {
         //     println!("clients :{:?}", client);
         //     // client.do_send(ws::Message::Text("Periodic message".to_string()));
         // }
-        P2PWebSocket::broadcast(&clients, "come on");
+        // P2PWebSocket::broadcast(&clients, "come on");
     }
 }
 #[actix_web::main]

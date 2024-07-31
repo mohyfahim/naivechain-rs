@@ -10,3 +10,4 @@ serde = { version = "1.0", features = ["derive"] }
 actix = "0.13.5"
 actix-web-actors = "4.3.0"
 tokio = "1.39.2"
+serde_json = "1.0.121"
