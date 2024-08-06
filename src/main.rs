@@ -4,40 +4,66 @@ use actix_web::{
 };
 use api::*;
 use chain::{Block, Chain};
-use net::P2PWebSocket;
+use clap::Parser;
+use libp2p::{
+    futures::StreamExt,
+    gossipsub::{self, Topic},
+    mdns, noise,
+    swarm::{NetworkBehaviour, SwarmEvent},
+    tcp, yamux, Swarm,
+};
+use net::{P2PMessage, TransmitHandlers};
 use std::sync::{Arc, Mutex};
+use std::{
+    env,
+    error::Error,
+    hash::{DefaultHasher, Hash, Hasher},
+    io,
+};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 mod api;
 mod chain;
+mod engine;
 mod net;
 
-async fn run_periodic_task(state: Arc<Mutex<ApiState>>) {
-    let interval = tokio::time::Duration::from_secs(10);
-    loop {
-        actix::clock::sleep(interval).await;
-        let ls = state.lock().unwrap();
-        let clients = ls.clients.lock().unwrap();
-        // for client in clients.iter() {
-        //     println!("clients :{:?}", client);
-        //     // client.do_send(ws::Message::Text("Periodic message".to_string()));
-        // }
-        // P2PWebSocket::broadcast(&clients, "come on");
-    }
+#[derive(Parser, Debug)]
+#[clap(author, version, about, long_about = None)]
+pub struct Cli {
+    #[clap(short, long, value_delimiter = ',', num_args = 1..)]
+    pub list: Option<Vec<String>>,
+    #[clap(short, long)]
+    pub port: u16,
 }
+
 #[actix_web::main]
-async fn main() -> std::io::Result<()> {
-    let block: Block = Block::new(0, "prevoius", chain::get_timestamp(), "salam", "None");
+async fn main() {
+    simple_logger::init_with_level(log::Level::Info).unwrap();
+    let cli = Cli::parse();
+    let (tx, rx) = unbounded_channel::<P2PMessage>();
+    let (tx_router, rx_router) = unbounded_channel::<P2PMessage>();
+
+    let transmit_handlers = TransmitHandlers {
+        swarm_tx: tx.clone(),
+        router_tx: tx_router.clone(),
+    };
+
+    let block: Block = Chain::get_genesis_block();
     let mut chain: Chain = Chain::new();
     chain.add_block(block, true);
 
     println!("here {chain:?}");
-    let api_states: Arc<Mutex<ApiState>> =
-        Arc::new(Mutex::new(ApiState::new(Arc::new(Mutex::new(chain)))));
-
-    actix_web::rt::spawn(run_periodic_task(api_states.clone()));
-
+    let api_states: ApiState =
+        ApiState::new(Arc::new(Mutex::new(chain)), transmit_handlers.clone());
     let shared_states = web::Data::new(api_states);
 
-    HttpServer::new(move || {
+    net::config_network(transmit_handlers.clone(), rx);
+    actix_web::rt::spawn(engine::handle_engine(
+        shared_states.clone(),
+        transmit_handlers.clone(),
+        rx_router,
+    ));
+
+    let _ = HttpServer::new(move || {
         App::new()
             .service(
                 web::scope("/blocks")
@@ -45,15 +71,11 @@ async fn main() -> std::io::Result<()> {
                     .route("/get", web::get().to(api_blocks))
                     .route("/mine", web::post().to(api_mine)),
             )
-            .service(
-                web::scope("/ws")
-                    .app_data(shared_states.clone())
-                    .route("/", web::get().to(api_start_ws)),
-            )
             .route("/peers", web::get().to(api_peer))
             .route("/addpeer", web::get().to(api_add_peer))
     })
-    .bind(("127.0.0.1", 8080))?
+    .bind(("127.0.0.1", cli.port))
+    .unwrap()
     .run()
-    .await
+    .await;
 }
