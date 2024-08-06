@@ -1,95 +1,147 @@
 use actix::prelude::*;
 use actix::{Actor, Addr, Running, StreamHandler};
 use actix_web_actors::ws;
+use libp2p::{
+    futures::StreamExt,
+    gossipsub::{self, Topic},
+    mdns, noise,
+    swarm::{NetworkBehaviour, SwarmEvent},
+    tcp, yamux, Swarm,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::Result;
-use std::sync::{Arc, Mutex};
-pub type P2PClientsType = Arc<Mutex<Vec<Addr<P2PWebSocket>>>>;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+
+use crate::chain::Block;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum P2PMessage {
-    query_latest,
-    query_all,
-    response_blockchain(String),
+    QueryLatest,
+    QueryAll,
+    ResponseBlockchain(Vec<Block>),
 }
 
-pub struct P2PWebSocket {
-    clients: P2PClientsType,
+// We create a custom network behaviour that combines Gossipsub and Mdns.
+#[derive(NetworkBehaviour)]
+pub struct P2PNetWorkBehaviour {
+    pub gossipsub: gossipsub::Behaviour,
+    pub mdns: mdns::tokio::Behaviour,
 }
 
-// Define a wrapper type that implements actix::Message
-#[derive(Message)]
-#[rtype(result = "()")]
-struct BroadcastMessage(String);
-impl Handler<BroadcastMessage> for P2PWebSocket {
-    type Result = ();
-
-    fn handle(&mut self, msg: BroadcastMessage, ctx: &mut Self::Context) {
-        ctx.text(msg.0);
-    }
+#[derive(Clone)]
+pub struct TransmitHandlers {
+    pub swarm_tx: UnboundedSender<P2PMessage>,
+    pub router_tx: UnboundedSender<P2PMessage>,
 }
 
-impl P2PWebSocket {
-    pub fn new(clients: P2PClientsType) -> Self {
-        Self { clients }
-    }
-
-    pub fn broadcast(clients: &Vec<Addr<P2PWebSocket>>, message: P2PMessage) -> Result<()> {
-        let serialized_message = serde_json::to_string(&message)?;
-        for client in clients.iter() {
-            client.do_send(BroadcastMessage(serialized_message.clone()));
-        }
-        Ok(())
-    }
-}
-
-impl Actor for P2PWebSocket {
-    type Context = ws::WebsocketContext<Self>;
-
-    fn started(&mut self, ctx: &mut Self::Context) {
-        println!("connection started ");
-        self.clients.lock().unwrap().push(ctx.address());
-    }
-    fn stopping(&mut self, ctx: &mut Self::Context) -> Running {
-        println!("stopping...");
-        let mut clients = self.clients.lock().unwrap();
-        if let Some(pos) = clients.iter().position(|addr| addr == &ctx.address()) {
-            clients.remove(pos);
-        }
-        Running::Stop
-    }
-}
-
-impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for P2PWebSocket {
-    fn handle(&mut self, item: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
-        println!("msg {:?}", item);
-        match item {
-            Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
-            Ok(ws::Message::Text(text)) => {
-                match serde_json::from_str::<P2PMessage>(&text) {
-                    Ok(message) => {
-                        match message {
-                            P2PMessage::query_all => ctx.text("query all"),
-                            P2PMessage::query_latest => ctx.text("query latest"),
-                            P2PMessage::response_blockchain(t) => ctx.text(t),
-                        }
-                    },
-                    Err(e) => {
-                        println!("Failed to deserialize message: {:?}", e);
-                        ctx.stop();
-                    },
+pub async fn handle_swarm(
+    mut swarm: Swarm<P2PNetWorkBehaviour>,
+    topic: gossipsub::IdentTopic,
+    transmit_handler: TransmitHandlers,
+    mut rx: UnboundedReceiver<P2PMessage>,
+) {
+    log::info!("swarm task is started");
+    loop {
+        tokio::select! {
+            Some(msg) = rx.recv() => {
+                log::info!("Sending: {:?}", msg);
+                if let Err(e) = swarm
+                .behaviour_mut().gossipsub
+                .publish(topic.clone(), serde_json::to_string::<P2PMessage>(&msg).unwrap()) {
+                log::error!("Publish error: {e:?}");
                 }
-            },
-            Ok(ws::Message::Binary(bin)) => ctx.binary(bin),
-            Ok(ws::Message::Close(reason)) => {
-                println!("ctx close");
-                ctx.close(reason);
-                ctx.stop();
             }
-            _ => {
-                println!("ctx stop");
-                ctx.stop()
+            event = swarm.select_next_some() => match event {
+                SwarmEvent::Behaviour(P2PNetWorkBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
+                    for (peer_id, _multiaddr) in list {
+                        log::info!("mDNS discovered a new peer: {peer_id}");
+                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                        // TODO: add init connection here
+                        todo!()
+                    }
+                },
+                SwarmEvent::Behaviour(P2PNetWorkBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
+                    for (peer_id, _multiaddr) in list {
+                        log::info!("mDNS discover peer has expired: {peer_id}");
+                        swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
+                    }
+                },
+                SwarmEvent::Behaviour(P2PNetWorkBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                    propagation_source: peer_id,
+                    message_id: id,
+                    message,
+                })) => {
+                    let msg = String::from_utf8_lossy(&message.data);
+                    log::info!(
+                        "Got message: '{}' with id: {id} from peer: {peer_id}",
+                        msg,
+                    );
+                    transmit_handler.router_tx.send(serde_json::from_str::<P2PMessage>(&msg).unwrap()).unwrap();
+                    },
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    log::info!("Local node is listening on {address}");
+                }
+                _ => {}
             }
         }
     }
+}
+
+pub fn config_network(transmit_handler: TransmitHandlers, rx: UnboundedReceiver<P2PMessage>) {
+    let mut swarm = libp2p::SwarmBuilder::with_new_identity()
+        .with_tokio()
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )
+        .unwrap()
+        .with_quic()
+        .with_behaviour(|key| {
+            // To content-address message, we can take the hash of message and use it as an ID.
+            let message_id_fn = |message: &gossipsub::Message| {
+                let mut s = DefaultHasher::new();
+                message.data.hash(&mut s);
+                gossipsub::MessageId::from(s.finish().to_string())
+            };
+
+            // Set a custom gossipsub configuration
+            let gossipsub_config = gossipsub::ConfigBuilder::default()
+                .heartbeat_interval(tokio::time::Duration::from_secs(10)) // This is set to aid debugging by not cluttering the log space
+                .validation_mode(gossipsub::ValidationMode::Strict) // This sets the kind of message validation. The default is Strict (enforce message signing)
+                .message_id_fn(message_id_fn) // content-address messages. No two messages of the same content will be propagated.
+                .build()
+                .map_err(|msg| io::Error::new(io::ErrorKind::Other, msg))?; // Temporary hack because `build` does not return a proper `std::error::Error`.
+
+            // build a gossipsub network behaviour
+            let gossipsub = gossipsub::Behaviour::new(
+                gossipsub::MessageAuthenticity::Signed(key.clone()),
+                gossipsub_config,
+            )?;
+
+            let mdns =
+                mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())?;
+            Ok(P2PNetWorkBehaviour { gossipsub, mdns })
+        })
+        .unwrap()
+        .with_swarm_config(|c| c.with_idle_connection_timeout(tokio::time::Duration::from_secs(60)))
+        .build();
+
+    let topic = gossipsub::IdentTopic::new("test-net");
+    // subscribes to our topic
+    swarm.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
+
+    // Read full lines from stdin
+    // let mut stdin = io::BufReader::new(io::stdin()).lines();
+
+    // Listen on all interfaces and whatever port the OS assigns
+    swarm
+        .listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap())
+        .unwrap();
+    swarm
+        .listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap())
+        .unwrap();
+
+    actix_web::rt::spawn(handle_swarm(swarm, topic, transmit_handler, rx));
 }
