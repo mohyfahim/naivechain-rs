@@ -3,25 +3,40 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     pub index: usize,
-    #[serde(skip_serializing)]
     pub previous_hash: String,
     pub timestamp: u64,
     pub data: String,
-    #[serde(skip_serializing)]
     pub hash: String,
 }
 
 impl Block {
-    pub fn new(index: usize, previous_hash: &str, timestamp: u64, data: &str, hash: &str) -> Block {
+    pub fn new_with_hash(
+        index: usize,
+        previous_hash: &str,
+        timestamp: u64,
+        data: &str,
+        hash: &str,
+    ) -> Block {
         Block {
             index,
             previous_hash: previous_hash.to_string(),
             timestamp,
             data: data.to_string(),
             hash: hash.to_string(),
+        }
+    }
+
+    pub fn new(index: usize, previous_hash: &str, timestamp: u64, data: &str) -> Block {
+        let hash = calculate_hash(index, previous_hash, timestamp, data);
+        Block {
+            index,
+            previous_hash: previous_hash.to_string(),
+            timestamp,
+            data: data.to_string(),
+            hash,
         }
     }
 }
@@ -39,6 +54,23 @@ impl Chain {
         Chain { next_index, chains }
     }
 
+    pub fn replace_block_chain(&mut self, new_blocks: Vec<Block>) {
+        self.chains = new_blocks;
+    }
+    pub fn get_genesis_block() -> Block {
+        Block::new(0, "0", get_timestamp(), "salam")
+    }
+    pub fn is_valid_chain(chain: &Chain) -> bool {
+        if chain.chains.get(0).unwrap() != &Chain::get_genesis_block() {
+            return false;
+        }
+        for (b1, b2) in chain.chains.iter().zip(chain.chains.iter().skip(1)) {
+            if !Chain::is_valid_new_block(b2, b1) {
+                return false;
+            }
+        }
+        true
+    }
     pub fn is_valid_new_block(new_block: &Block, previous_block: &Block) -> bool {
         if previous_block.index + 1 != new_block.index {
             println!(
