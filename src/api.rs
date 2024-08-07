@@ -1,14 +1,10 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-
 use crate::{
-    chain::{calculate_hash, get_timestamp, Block, Chain},
+    chain::{get_timestamp, Block, Chain},
     net::{P2PMessage, TransmitHandlers},
 };
-use actix_web::{web, Error, HttpRequest, HttpResponse, Responder};
-use actix_web_actors::ws;
-use libp2p::Swarm;
+use actix_web::{web, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::UnboundedSender;
 
 pub struct ApiState {
     pub chains: Arc<Mutex<Chain>>,
@@ -85,7 +81,7 @@ pub async fn api_mine(msg: web::Json<MineSchema>, data: web::Data<ApiState>) -> 
     let timestamp = get_timestamp();
     println!("chain is {chains:?}");
     let new_block = Block::new(index, &previous_hash, timestamp, msg.data.as_str());
-    chains.add_block(new_block.clone(), false);
+    chains.add_block(new_block.clone());
     println!("chain is {chains:?}");
     if let Err(e) = data
         .transmit_handlers

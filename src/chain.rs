@@ -13,7 +13,7 @@ pub struct Block {
 }
 
 impl Block {
-    pub fn new_with_hash(
+    pub fn _new_with_hash(
         index: usize,
         previous_hash: &str,
         timestamp: u64,
@@ -48,30 +48,38 @@ pub struct Chain {
 }
 
 impl Chain {
-    pub fn new() -> Self {
-        let chains: Vec<Block> = Vec::new();
-        let next_index: usize = 0;
+    pub fn new(genesis_block: Block) -> Self {
+        let chains: Vec<Block> = vec![genesis_block];
+        let next_index: usize = 1;
         Chain { next_index, chains }
     }
 
-    pub fn replace_block_chain(&mut self, new_blocks: Vec<Block>) {
-        self.chains = new_blocks;
+    pub fn replace_block_chain(&mut self, new_blocks: Vec<Block>) -> bool {
+        if Self::is_valid_chain(&new_blocks) && self.chains.len() < new_blocks.len() {
+            log::info!("Received blockchain is valid. Replacing current blockchain with received blockchain");
+            self.chains = new_blocks;
+            return true;
+        } else {
+            log::error!("Received blockchain is invalid");
+        }
+        false
     }
     pub fn get_genesis_block() -> Block {
-        Block::new(0, "0", get_timestamp(), "salam")
+        Block::new(0, "0", 1723020013, "genesis")
     }
-    pub fn is_valid_chain(chain: &Chain) -> bool {
-        if chain.chains.get(0).unwrap() != &Chain::get_genesis_block() {
+    pub fn is_valid_chain(chain: &Vec<Block>) -> bool {
+        if chain.get(0).unwrap() != &Self::get_genesis_block() {
             return false;
         }
-        for (b1, b2) in chain.chains.iter().zip(chain.chains.iter().skip(1)) {
-            if !Chain::is_valid_new_block(b2, b1) {
+        for (b1, b2) in chain.iter().zip(chain.iter().skip(1)) {
+            if !Self::is_valid_new_block(b2, b1) {
                 return false;
             }
         }
         true
     }
     pub fn is_valid_new_block(new_block: &Block, previous_block: &Block) -> bool {
+        log::info!("new block {:?}, prev block {:?}", new_block, previous_block);
         if previous_block.index + 1 != new_block.index {
             println!(
                 "invalid index {}, {}",
@@ -92,9 +100,8 @@ impl Chain {
         self.chains.last()
     }
 
-    pub fn add_block(&mut self, block: Block, genesis: bool) {
-        //TODO: check the block validation before pushing to chain
-        if genesis || Chain::is_valid_new_block(&block, self.get_latest_block().unwrap()) {
+    pub fn add_block(&mut self, block: Block) {
+        if Chain::is_valid_new_block(&block, self.get_latest_block().unwrap()) {
             self.chains.push(block);
             self.next_index += 1;
         }

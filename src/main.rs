@@ -5,22 +5,10 @@ use actix_web::{
 use api::*;
 use chain::{Block, Chain};
 use clap::Parser;
-use libp2p::{
-    futures::StreamExt,
-    gossipsub::{self, Topic},
-    mdns, noise,
-    swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, Swarm,
-};
 use net::{P2PMessage, TransmitHandlers};
 use std::sync::{Arc, Mutex};
-use std::{
-    env,
-    error::Error,
-    hash::{DefaultHasher, Hash, Hasher},
-    io,
-};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+
+use tokio::sync::mpsc::unbounded_channel;
 mod api;
 mod chain;
 mod engine;
@@ -47,9 +35,8 @@ async fn main() {
         router_tx: tx_router.clone(),
     };
 
-    let block: Block = Chain::get_genesis_block();
-    let mut chain: Chain = Chain::new();
-    chain.add_block(block, true);
+    let genesis_block: Block = Chain::get_genesis_block();
+    let chain: Chain = Chain::new(genesis_block);
 
     println!("here {chain:?}");
     let api_states: ApiState =
