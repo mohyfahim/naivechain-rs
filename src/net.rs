@@ -49,7 +49,7 @@ pub async fn handle_swarm(
                 if let Err(e) = swarm
                 .behaviour_mut().gossipsub
                 .publish(topic.clone(), serde_json::to_string::<P2PMessage>(&msg).unwrap()) {
-                log::error!("Publish error: {e:?}");
+                    log::error!("Publish error: {e:?}");
                 }
             }
             event = swarm.select_next_some() => match event {
@@ -57,8 +57,6 @@ pub async fn handle_swarm(
                     for (peer_id, _multiaddr) in list {
                         log::info!("mDNS discovered a new peer: {peer_id}");
                         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                        // TODO: add init connection here
-                        todo!()
                     }
                 },
                 SwarmEvent::Behaviour(P2PNetWorkBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
@@ -67,6 +65,17 @@ pub async fn handle_swarm(
                         swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
                     }
                 },
+                SwarmEvent::Behaviour(P2PNetWorkBehaviourEvent::Gossipsub(gossipsub::Event::Subscribed {
+                    peer_id,
+                    topic: r_topic,
+                })) => {
+                    log::info!("peer id {peer_id} subscribed to {r_topic}");
+                    if let Err(e) = swarm
+                        .behaviour_mut().gossipsub
+                        .publish(topic.clone(), serde_json::to_string::<P2PMessage>(&P2PMessage::QueryLatest).unwrap()) {
+                            log::error!("Publish error: {e:?}");
+                        }
+                }
                 SwarmEvent::Behaviour(P2PNetWorkBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     propagation_source: peer_id,
                     message_id: id,
