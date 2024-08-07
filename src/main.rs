@@ -5,7 +5,7 @@ use actix_web::{
 use api::*;
 use chain::{Block, Chain};
 use clap::Parser;
-use net::{P2PMessage, TransmitHandlers};
+use net::{P2PMessage, ReceiveHandlers, TransmitHandlers};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc::unbounded_channel;
@@ -29,10 +29,16 @@ async fn main() {
     let cli = Cli::parse();
     let (tx, rx) = unbounded_channel::<P2PMessage>();
     let (tx_router, rx_router) = unbounded_channel::<P2PMessage>();
+    let (tx_api_peers, rx_api_peers) = unbounded_channel::<P2PMessage>();
 
     let transmit_handlers = TransmitHandlers {
         swarm_tx: tx.clone(),
         router_tx: tx_router.clone(),
+        api_peers_tx: tx_api_peers.clone(),
+    };
+
+    let receive_handlers = ReceiveHandlers {
+        api_peers_rx: Mutex::new(rx_api_peers),
     };
 
     let genesis_block: Block = Chain::get_genesis_block();
@@ -40,7 +46,7 @@ async fn main() {
 
     println!("here {chain:?}");
     let api_states: ApiState =
-        ApiState::new(Arc::new(Mutex::new(chain)), transmit_handlers.clone());
+        ApiState::new(Arc::new(Mutex::new(chain)), transmit_handlers.clone(), receive_handlers);
     let shared_states = web::Data::new(api_states);
 
     net::config_network(transmit_handlers.clone(), rx);
@@ -52,14 +58,14 @@ async fn main() {
 
     let _ = HttpServer::new(move || {
         App::new()
+            .app_data(shared_states.clone())
             .service(
                 web::scope("/blocks")
-                    .app_data(shared_states.clone())
                     .route("/get", web::get().to(api_blocks))
                     .route("/mine", web::post().to(api_mine)),
             )
             .route("/peers", web::get().to(api_peer))
-            .route("/addpeer", web::get().to(api_add_peer))
+            .route("/addpeer", web::post().to(api_add_peer))
     })
     .bind(("127.0.0.1", cli.port))
     .unwrap()

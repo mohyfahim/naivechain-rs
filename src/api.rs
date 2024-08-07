@@ -1,21 +1,28 @@
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use crate::{
     chain::{get_timestamp, Block, Chain},
-    net::{P2PMessage, TransmitHandlers},
+    net::{P2PMessage, ReceiveHandlers, TransmitHandlers},
 };
 use actix_web::{web, HttpResponse, Responder};
+use libp2p::{Multiaddr, PeerId};
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 pub struct ApiState {
     pub chains: Arc<Mutex<Chain>>,
     pub transmit_handlers: TransmitHandlers,
+    pub receive_handlers: ReceiveHandlers,
 }
 
 impl ApiState {
-    pub fn new(chains: Arc<Mutex<Chain>>, transmit_handlers: TransmitHandlers) -> Self {
+    pub fn new(
+        chains: Arc<Mutex<Chain>>,
+        transmit_handlers: TransmitHandlers,
+        receive_handlers: ReceiveHandlers,
+    ) -> Self {
         Self {
             chains,
             transmit_handlers,
+            receive_handlers,
         }
     }
 }
@@ -93,9 +100,45 @@ pub async fn api_mine(msg: web::Json<MineSchema>, data: web::Data<ApiState>) -> 
 
     HttpResponse::Ok().body("ok")
 }
-pub async fn api_peer() -> impl Responder {
-    HttpResponse::Ok().body("Hello world!")
+pub async fn api_peer(data: web::Data<ApiState>) -> impl Responder {
+    data.transmit_handlers
+        .router_tx
+        .send(P2PMessage::QueryPeers)
+        .unwrap();
+    let mut rx = data.receive_handlers.api_peers_rx.lock().unwrap();
+    let msg: Option<Vec<PeerId>> = tokio::select! {
+        Some(msg) = rx.recv() => {
+            match msg {
+                P2PMessage::ResponsePeers(peers) => {
+                    Some(peers)
+                }
+                _ => { None }
+            }
+        }
+        _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
+            log::warn!("timeout in getting peers list");
+            None
+        }
+    };
+    if let Some(msg) = msg {
+        HttpResponse::Ok().json(msg)
+    } else {
+        HttpResponse::Ok().body("none")
+    }
 }
-pub async fn api_add_peer() -> impl Responder {
-    HttpResponse::Ok().body("Hello world!")
+
+#[derive(Deserialize, Serialize)]
+pub struct AddPerrSchema {
+    peer: String,
+}
+pub async fn api_add_peer(
+    msg: web::Json<AddPerrSchema>,
+    data: web::Data<ApiState>,
+) -> impl Responder {
+    let _ = data
+        .transmit_handlers
+        .router_tx
+        .send(P2PMessage::AddPeer(msg.peer.clone()))
+        .unwrap();
+    HttpResponse::Ok().body("ok")
 }

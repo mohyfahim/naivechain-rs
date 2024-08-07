@@ -1,16 +1,17 @@
-use actix::prelude::*;
-use actix::{Actor, Addr, Running, StreamHandler};
-use actix_web_actors::ws;
+use libp2p::multiaddr::Protocol;
 use libp2p::{
     futures::StreamExt,
-    gossipsub::{self, Topic},
-    mdns, noise,
+    gossipsub, mdns, noise,
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Swarm,
 };
+use libp2p::{Multiaddr, PeerId};
 use serde::{Deserialize, Serialize};
+use std::borrow::BorrowMut;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
+use std::str::FromStr;
+use std::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::chain::Block;
@@ -20,6 +21,9 @@ pub enum P2PMessage {
     QueryLatest,
     QueryAll,
     ResponseBlockchain(Vec<Block>),
+    QueryPeers,
+    ResponsePeers(Vec<PeerId>),
+    AddPeer(String),
 }
 
 // We create a custom network behaviour that combines Gossipsub and Mdns.
@@ -33,6 +37,10 @@ pub struct P2PNetWorkBehaviour {
 pub struct TransmitHandlers {
     pub swarm_tx: UnboundedSender<P2PMessage>,
     pub router_tx: UnboundedSender<P2PMessage>,
+    pub api_peers_tx: UnboundedSender<P2PMessage>,
+}
+pub struct ReceiveHandlers {
+    pub api_peers_rx: Mutex<UnboundedReceiver<P2PMessage>>,
 }
 
 pub async fn handle_swarm(
@@ -42,16 +50,53 @@ pub async fn handle_swarm(
     mut rx: UnboundedReceiver<P2PMessage>,
 ) {
     log::info!("swarm task is started");
+
+    let handle_msg = |msg: P2PMessage, swarm: &mut Swarm<P2PNetWorkBehaviour>| match msg {
+        P2PMessage::QueryPeers => {
+            let peers = swarm
+                .behaviour_mut()
+                .gossipsub
+                .peer_protocol()
+                .map(|x| x.0.clone())
+                .collect::<Vec<_>>();
+            transmit_handler
+                .api_peers_tx
+                .send(P2PMessage::ResponsePeers(peers))
+                .unwrap();
+        }
+        P2PMessage::AddPeer(peer) => {
+            match &Multiaddr::from_str(&peer) {
+                Ok(addr) => {
+                    match addr.iter().last() {
+                        Some(Protocol::P2p(peer_id)) => {
+                            swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                        }
+                        _ => {
+                            log::error!("multi addr without peer id");
+                        }
+                    };
+                }
+                Err(e) => {
+                    log::warn!("wrong peer id {e}");
+                }
+            };
+        }
+        _ => {
+            log::info!("Sending: {:?}", msg);
+            if let Err(e) = swarm.behaviour_mut().gossipsub.publish(
+                topic.clone(),
+                serde_json::to_string::<P2PMessage>(&msg).unwrap(),
+            ) {
+                log::error!("Publish error: {e:?}");
+            }
+        }
+    };
+
     loop {
         tokio::select! {
-            Some(msg) = rx.recv() => {
-                log::info!("Sending: {:?}", msg);
-                if let Err(e) = swarm
-                .behaviour_mut().gossipsub
-                .publish(topic.clone(), serde_json::to_string::<P2PMessage>(&msg).unwrap()) {
-                    log::error!("Publish error: {e:?}");
-                }
-            }
+            Some(msg) = rx.recv() => handle_msg(msg, swarm.borrow_mut()),
+
+
             event = swarm.select_next_some() => match event {
                 SwarmEvent::Behaviour(P2PNetWorkBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer_id, _multiaddr) in list {

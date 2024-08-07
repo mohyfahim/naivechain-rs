@@ -59,9 +59,9 @@ pub async fn handle_engine(
                         log::info!("Received blockchain is longer than current blockchain");
                         if chains.replace_block_chain(received_chain.clone()) {
                             handlers
-                            .swarm_tx
-                            .send(P2PMessage::ResponseBlockchain(received_chain))
-                            .unwrap();
+                                .swarm_tx
+                                .send(P2PMessage::ResponseBlockchain(received_chain))
+                                .unwrap();
                         }
                     }
                 } else {
@@ -70,6 +70,21 @@ pub async fn handle_engine(
                     );
                 }
             }
+            P2PMessage::QueryPeers => {
+                log::info!("query peers");
+                handlers.swarm_tx.send(P2PMessage::QueryPeers).unwrap();
+            }
+            P2PMessage::ResponsePeers(peers) => {
+                log::info!("response peers peers");
+                handlers
+                    .api_peers_tx
+                    .send(P2PMessage::ResponsePeers(peers))
+                    .unwrap();
+            }
+            P2PMessage::AddPeer(_) => {
+                log::info!("add peer");
+                handlers.swarm_tx.send(msg).unwrap();
+            },
         }
     };
     loop {
