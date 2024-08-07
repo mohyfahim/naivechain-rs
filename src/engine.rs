@@ -34,10 +34,10 @@ pub async fn handle_engine(
                     .send(P2PMessage::ResponseBlockchain(vec![latest_block]))
                     .unwrap();
             }
-            P2PMessage::ResponseBlockchain(chain) => {
+            P2PMessage::ResponseBlockchain(received_chain) => {
                 let mut chains = shared_states.chains.lock().unwrap();
                 let latest_block_held = chains.get_latest_block().unwrap();
-                let lastes_block_received = chain.last().unwrap();
+                let lastes_block_received = received_chain.last().unwrap();
                 if lastes_block_received.index > latest_block_held.index {
                     log::info!(
                         "blockchain possibly behind. We got:   {} + ' Peer got: ' + {}",
@@ -46,18 +46,23 @@ pub async fn handle_engine(
                     );
                     if latest_block_held.hash == lastes_block_received.previous_hash {
                         log::info!("We can append the received block to our chain");
-                        chains.add_block(lastes_block_received.clone(), false);
+                        chains.add_block(lastes_block_received.clone());
                         let latest_block = chains.get_latest_block().unwrap();
                         handlers
                             .swarm_tx
                             .send(P2PMessage::ResponseBlockchain(vec![latest_block.clone()]))
                             .unwrap();
-                    } else if chain.len() == 1 {
+                    } else if received_chain.len() == 1 {
                         log::info!("We have to query the chain from our peer");
                         handlers.swarm_tx.send(P2PMessage::QueryAll).unwrap();
                     } else {
                         log::info!("Received blockchain is longer than current blockchain");
-                        chains.replace_block_chain(chain);
+                        if chains.replace_block_chain(received_chain.clone()) {
+                            handlers
+                            .swarm_tx
+                            .send(P2PMessage::ResponseBlockchain(received_chain))
+                            .unwrap();
+                        }
                     }
                 } else {
                     log::info!(
